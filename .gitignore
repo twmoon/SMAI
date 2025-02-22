@@ -15,4 +15,4 @@ bak/
 synonyms.json
 
 # 사용하지 않는 파일이 저장된 디렉토리 무시
-not_using/
+**/not_using/
