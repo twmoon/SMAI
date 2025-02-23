@@ -10,7 +10,7 @@ import re
 import random
 
 class SynonymManager:
-    def __init__(self, csv_path='hagsailjeong.csv', synonym_path='academic_terms.json'):
+    def __init__(self, csv_path='hagsailjeong.csv', synonym_path='academic_terms_bllossom_8b.json'):
         self.csv_path = Path(csv_path)
         self.synonym_path = Path(synonym_path)
         self.kiwi = Kiwi()
@@ -51,7 +51,7 @@ class SynonymManager:
         }
         try:
             response = ollama.chat(
-                model='exaone3.5:32b',
+                model='bllossom:8b',
                 messages=[{'role': 'user', 'content': prompt_map[term_type]}]
             )
             # 응답 정제: 숫자, 특수문자, 줄바꿈 제거
