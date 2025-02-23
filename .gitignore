@@ -4,12 +4,13 @@ __pycache__/
 
 # JetBrains IDE 설정 폴더 무시
 .idea/
+**/.idea/
 
 # 백업 파일이 저장된 디렉토리 무시
 bak/
 
 # Git 속성 파일 무시
-.gitattributes
+**/.gitattributes
 
 # synonyms.json 파일 무시
 synonyms.json
