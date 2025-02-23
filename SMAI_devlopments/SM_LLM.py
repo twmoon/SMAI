@@ -1,150 +1,148 @@
 import pandas as pd
 from datetime import datetime
-import ollama
 import time
 import re
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from rank_bm25 import BM25Okapi
+from sentence_transformers import SentenceTransformer, util
+from kiwipiepy import Kiwi
 from SynonymPattern import SynonymManager
-
 
 class AcademicCalendarRAG:
     def __init__(self, csv_path='hagsailjeong.csv'):
-        # SynonymManager 인스턴스 생성
         self.synonym_mgr = SynonymManager()
-        # synonyms.json 파일 생성/로딩 완료 여부를 기다림
         self._wait_for_synonyms()
-        self.synonym_map = self.synonym_mgr.get_synonyms()
+        self.term_db = self.synonym_mgr.get_synonyms()
+        self.synonym_map = {term: data['synonyms'] for term, data in self.term_db.items()}
         self.df = self._load_data(csv_path)
-        self.vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(2, 4))
-        self._prepare_vectors()
+        self.model = SentenceTransformer('distiluse-base-multilingual-cased-v1')
+        self.kiwi = Kiwi()
+        self._prepare_embeddings()
+        self.current_date = pd.Timestamp(datetime.today().date())
 
     def _wait_for_synonyms(self):
         retry_count = 0
-        # synonyms.json 파일이 생성될 때까지 대기 (최대 60번, 10초 간격 → 최대 10분, 필요에 따라 조정)
         while not self.synonym_mgr.synonym_path.exists():
             if retry_count == 0:
-                print("동의어 사전을 생성 중입니다. 최대 2분 소요될 수 있습니다...")
-                # 처음 한 번 생성 시도
-                self.synonym_mgr._generate_synonyms()
-            if retry_count >= 12:  # 12회 × 10초 = 120초 (2분 타임아웃)
+                print("동의어 사전 생성 중... (최대 2분 소요)")
+                #self.synonym_mgr._generate_synonyms() #함수명 변경됨
+                self.synonym_mgr._generate_terms()
+            if retry_count >= 12:
                 raise FileNotFoundError("동의어 사전 생성 실패")
-            if not self.synonym_mgr.synonym_path.exists():
-                print("생성 진행 중... (10초 후 재확인)")
-                time.sleep(10)
-                retry_count += 1
-                continue
-            break
-        print("동의어 사전이 정상적으로 로드되었습니다.\n")
+            time.sleep(10)
+            retry_count += 1
+        print("동의어 사전 로드 완료\n")
 
     def _load_data(self, csv_path):
         df = pd.read_csv(csv_path)
         df['Start'] = pd.to_datetime(df['Start'])
         df['End'] = pd.to_datetime(df['End'])
-        current_date = datetime.today().date()
+        current_date = pd.Timestamp(datetime.today().date())
         print("현재 날짜:", current_date)
         df = df[df['Start'].dt.year >= current_date.year]
-
-        # 질의에 활용할 태그 추출: 간단 키워드 기반
-        keywords = ['수강신청', '등록', '성적 입력', '성적입력', '계절수업']
-
-        def extract_tags(title):
-            tags = []
-            for kw in keywords:
-                if kw in title:
-                    tags.append(kw)
-            return ", ".join(tags) if tags else "일반"
-
-        df['tags'] = df['Title'].apply(extract_tags)
-        df['document'] = df.apply(lambda row:
-                                  f"{row['Title']} ({row['tags']}) 일정은 {row['Start'].strftime('%Y년 %m월 %d일')}부터 {row['End'].strftime('%Y년 %m월 %d일')}까지입니다.",
-                                  axis=1)
+        df['document'] = df['Title']
         return df
 
-    def _prepare_vectors(self):
-        docs = self.df['document'].tolist()
-        self.document_vectors = self.vectorizer.fit_transform(docs)
-        tokenized_documents = [doc.split(" ") for doc in self.df['document']]
-        self.bm25 = BM25Okapi(tokenized_documents)
+    def _prepare_embeddings(self):
+        self.document_embeddings = self.model.encode(
+            self.df['document'].tolist(),
+            convert_to_tensor=True,
+            show_progress_bar=True
+        )
 
-    def _get_relevant_documents(self, query, top_k=3):
-        # TF-IDF를 이용한 기본 검색
-        query_vector = self.vectorizer.transform([query])
-        similarities_all = cosine_similarity(query_vector, self.document_vectors).flatten()
-        q_lower = query.lower()
-        adjusted_similarities = similarities_all.copy()
-        # 예시: '수강신청' 키워드가 있으면 장바구니 문서 페널티, 아니면 보너스를 적용
-        for i in range(len(adjusted_similarities)):
-            title = self.df.iloc[i]['Title'].lower()
-            if "수강신청" in q_lower:
-                if "장바구니" in title:
-                    adjusted_similarities[i] *= 0.5
-                else:
-                    adjusted_similarities[i] *= 1.2
-            if ("등록" in q_lower or "등록금" in q_lower) and "등록" in title:
-                adjusted_similarities[i] *= 1.1
-        top_indices = adjusted_similarities.argsort()[-top_k:][::-1]
-        relevant_docs = []
-        for idx in top_indices:
-            if adjusted_similarities[idx] > 0:
-                relevant_docs.append(self.df['document'].iloc[idx])
-        return "\n".join(relevant_docs) if relevant_docs else "관련 정보를 찾을 수 없습니다."
+    def _extract_keywords(self, query):
+        tokens = self.kiwi.tokenize(query)
+        return [token.form for token in tokens if token.tag.startswith('NN')] or [query]
 
-    def _get_registration_document(self):
-        filtered_data = self.df[self.df['Title'].str.contains('등록', case=False, na=False)]
-        if not filtered_data.empty:
-            filtered_data = filtered_data.sort_values(by='Start')
-            return "\n".join(
-                filtered_data.apply(
-                    lambda
-                        row: f"{row['Title']} 일정은 {row['Start'].strftime('%Y년 %m월 %d일')}부터 {row['End'].strftime('%Y년 %m월 %d일')}까지입니다.",
-                    axis=1
-                ).tolist()
-            )
-        return "등록 관련 정보를 찾을 수 없습니다."
+    def _get_relevant_documents(self, query, top_k=10, similarity_threshold=0.3):
+        query_keywords = self._extract_keywords(query)
+        q_lower = query.lower().replace(" ", "")
+        # 유사도 계산
+        query_embedding = self.model.encode(query, convert_to_tensor=True)
+        similarities = util.cos_sim(query_embedding, self.document_embeddings)[0].cpu().numpy()
+        # 개선된 가중치 시스템
+        for i in range(len(similarities)):
+            title = self.df.iloc[i]['Title'].lower().replace(" ", "")
+            # 긍정 가중치 조건
+            exact_match = any(kw.lower() == title for kw in query_keywords)
+            synonym_match = any(syn in title for syn in self.synonym_map.get(query, []))
+            # 부정 가중치 조건
+            negative_match = any(nt in title for nt in self.negative_terms) and '수강신청' in q_lower
+            if exact_match:
+                similarities[i] *= 2.0
+            elif synonym_match:
+                similarities[i] *= 1.5
+            elif any(kw in title for kw in query_keywords):
+                similarities[i] *= 1.2
+            if negative_match:
+                similarities[i] *= 0.3  # 강한 패널티 적용
+            elif "장바구니" in title and "수강신청" in q_lower:
+                similarities[i] *= 0.5
+        # 결과 필터링
+        top_indices = similarities.argsort()[-top_k:][::-1]
+        relevant_docs = self.df.iloc[top_indices]
+        filtered_docs = relevant_docs[similarities[top_indices] > similarity_threshold]
+        return filtered_docs if not filtered_docs.empty else pd.DataFrame()
+
+    def _extract_semester(self, events):
+        future_events = events[events['Start'] > self.current_date]
+        if future_events.empty:
+            return None
+        closest_event = future_events.sort_values('Start').iloc[0]
+        start_year = closest_event['Start'].year
+        if re.search(r'\d-학기', closest_event['Title']):
+            return f"{start_year}-{re.search(r'\d-학기', closest_event['Title']).group()}"
+        return f"{start_year}-{'1' if closest_event['Start'].month <= 6 else '2'}학기"
+
+    def _format_response(self, events, query):
+        response = ["안녕하세요! 관련 학사일정 안내드립니다.\n"]
+        # 학기 필터링
+        semester = self._extract_semester(events)
+        if semester:
+            events = events[events['Title'].str.contains(semester, na=False)]
+        # 시간대 분류
+        past = events[events['End'] < self.current_date]
+        future = events[events['Start'] > self.current_date]
+        # 과거 일정 처리
+        if not past.empty:
+            response.append("### 과거 일정")
+            for _, row in past.iterrows():
+                days_passed = (self.current_date - row['End']).days
+                response.append(
+                    f"- 🔴 {row['Title']}\n"
+                    f" ▸ 기간: {row['Start'].date()} ~ {row['End'].date()}\n"
+                    f" ▸ 상태: 종료 (D+{days_passed})\n"
+                )
+        # 미래 일정 처리
+        if not future.empty:
+            response.append("### 미래 일정")
+            sorted_future = future.sort_values('Start')
+            closest = sorted_future.iloc[0]
+            for _, row in sorted_future.iterrows():
+                days_remaining = (row['Start'] - self.current_date).days
+                icon = "💡" if row.equals(closest) else "🟢"
+                response.append(
+                    f"- {icon} {row['Title']}\n"
+                    f" ▸ 기간: {row['Start'].date()} ~ {row['End'].date()}\n"
+                    f" ▸ 상태: D-{days_remaining} 예정\n"
+                )
+        response.append("\n※ 정확한 정보는 학사운영팀(📞 02-2287-7077)으로 문의 바랍니다.")
+        return "\n".join(response)
 
     def get_answer(self, question):
-        # 질문에 '등록' 계열 단어가 포함되면 등록 관련 정보를 우선 사용
-        if "등록" in question or "등록금" in question:
-            relevant_context = self._get_registration_document()
-        else:
-            relevant_context = self._get_relevant_documents(question)
-        current_date = datetime.today().date()
-        prompt = f"""당신은 상명대학교 학생들을 위한 챗봇입니다. 다음 규칙에 따라 답변해주세요.
-0. 현재 날짜: {current_date}
-1. 학사일정 중 질문과 관련된 정보를 기반으로 답변할 것.
-2. 현재 날짜에서 가장 가까운 일정을 출력할 것.
-아래는 질문과 관련된 학사일정 정보입니다:
-{relevant_context}
-질문: {question}
-위 정보를 참고하여 답변해주세요. 날짜 정보는 정확하게 포함시키고, 관련 정보를 찾지 못한 경우 유사한 정보를 바탕으로 대답해주세요."""
-        try:
-            response = ollama.chat(
-                model='exaone3.5:latest',
-                messages=[{'role': 'user', 'content': prompt}]
-            )
-            content = response['message']['content']
-            cleaned_content = re.sub(r'\*{2,}', '', content).strip()
-            return cleaned_content
-        except Exception as e:
-            return f"오류가 발생했습니다: {str(e)}"
+        results = self._get_relevant_documents(question)
+        return self._format_response(results, question) if not results.empty else (
+            f"⚠️ '{question}' 관련 일정을 찾지 못했습니다.\n"
+            f"학사운영팀(☎ 02-2287-7077)으로 문의주시기 바랍니다."
+        )
 
-
-def main():
-    rag_system = AcademicCalendarRAG()
-    print("학사일정 RAG Load 완료.")
-    print("종료하려면 'quit' 또는 'exit'를 입력.")
-    while True:
-        question = input("\n질문: ")
-        if question.lower() in ['quit', 'exit']:
-            break
-        start_time = time.time()
-        answer = rag_system.get_answer(question)
-        print("\n답변:", answer)
-        elapsed_time = time.time() - start_time
-        print("Time Elapsed: {:.2f} Sec".format(elapsed_time))
-
+    def main(self):
+        print("\n🔍 학사일정 조회 시스템 작동 중...")
+        while True:
+            query = input("\n질문 (종료: quit): ")
+            if query.lower() in ['quit', 'exit']:
+                break
+            start = time.time()
+            print(f"\n{self.get_answer(query)}")
+            print(f"\n⏱️ 처리 시간: {time.time() - start:.2f}초")
 
 if __name__ == "__main__":
-    main()
+    AcademicCalendarRAG().main()

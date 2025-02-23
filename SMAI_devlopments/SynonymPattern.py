@@ -4,83 +4,73 @@ from pathlib import Path
 from kiwipiepy import Kiwi
 import ollama
 import time
+from tqdm import tqdm
+import sys  # Import sys for flushing
 
 
 class SynonymManager:
-    def __init__(self, csv_path='hagsailjeong.csv', synonym_path='synonyms.json'):
+    def __init__(self, csv_path='hagsailjeong.csv', synonym_path='academic_terms_bllossom.json'):
         self.csv_path = Path(csv_path)
         self.synonym_path = Path(synonym_path)
         self.kiwi = Kiwi()
-        self.synonyms = self._initialize_synonyms()
+        self.term_data = self._initialize_data()
 
-    def _initialize_synonyms(self):
+    def _initialize_data(self):
         if self.synonym_path.exists():
-            return self._load_synonyms()
-        return self._generate_synonyms()
+            return self._load_data()
+        return self._generate_terms()
 
-    def _generate_synonyms(self):
-        start_time = time.time()
+    def _generate_terms(self):
         df = pd.read_csv(self.csv_path)
         terms = df['Title'].unique().tolist()
-        total_terms = len(terms)
-        terms_processed = 0
-        dot_count = 0
+        term_db = {}
 
-        print("\n동의어 사전 생성이 시작되었습니다")
+        print("\n▶ 학술 용어 데이터베이스 생성 시작", flush=True)
+        start_time = time.time()
 
-        # 진행 상태 초기화
-        last_print_time = start_time
-        progress_template = "\r진행률: [%s%s] %d초 남음"
-        max_dots = 10
+        for term in tqdm(terms, desc="학술 용어 생성", unit="term"):
+            term_db[term] = {
+                'synonyms': self._get_llm_terms(term, '동의어'),
+                'negatives': self._get_llm_terms(term, '배제용어')
+            }
+            sys.stdout.flush()  # Flush output to force display
 
-        synonym_map = {}
-        for term in terms:
-            # 동의어 생성
-            synonyms = self._get_llm_synonyms(term)
-            synonym_map[term] = synonyms
+        self._save_data(term_db)
+        elapsed = time.time() - start_time
+        print(f"\n✓ 데이터베이스 생성 완료 ({elapsed:.1f}초)")
+        return term_db
 
-            # 진행률 계산
-            terms_processed += 1
-            current_time = time.time()
-            elapsed = current_time - start_time
-            avg_time = elapsed / terms_processed
-            remaining_time = avg_time * (total_terms - terms_processed)
-
-            # 2초마다 진행 상태 업데이트
-            if current_time - last_print_time >= 2:
-                filled_dots = min(dot_count + 1, max_dots)
-                empty_dots = max_dots - filled_dots
-                progress_bar = "•" * filled_dots + " " * empty_dots
-                print(progress_template % (progress_bar, "", int(remaining_time)), end="", flush=True)
-                dot_count += 1
-                last_print_time = current_time
-
-        # 생성 완료 메시지
-        print(f"\r동의어 사전 생성 완료 (총 {time.time() - start_time:.1f}초 소요)           ")
-        self._save_synonyms(synonym_map)
-        return synonym_map
-
-    def _get_llm_synonyms(self, term, num_synonyms=5):
+    def _get_llm_terms(self, term, term_type, syno_num=5, nega_num=30):
+        prompt_map = {
+            '동의어': f"'{term}'의 학사일정 동의어 {syno_num}개를 생성. 예시: 수강신청, 강좌등록. Let's think step by step.",
+            '배제용어': f"'{term}' 검색 시 혼동되지만 관련 없는 학사용어 {nega_num}개를 생성. 예시: 이의신청, 성적정정. Let's think step by step."
+        }
         try:
             response = ollama.chat(
-                model='exaone3.5:latest',
-                messages=[{
-                    'role': 'user',
-                    'content': f"'{term}'의 학사일정 동의어 {num_synonyms}개를 쉼표로 구분해주세요. 예시: 수강신청,강좌등록"
-                }]
+                model='bllossom:8b',
+                messages=[{'role': 'user', 'content': prompt_map[term_type]}]
             )
-            return [s.strip() for s in response['message']['content'].split(',')][:num_synonyms]
+            # 용어 타입에 따라 사용할 개수 설정
+            num_terms = syno_num if term_type == '동의어' else nega_num
+            return [t.strip() for t in response['message']['content'].split(',')[:num_terms]]
         except Exception as e:
-            print(f"\n오류 발생: {str(e)}")
+            print(f"\n⚠️ 오류: {str(e)}")
             return []
 
-    def _save_synonyms(self, data):
+    def _save_data(self, data):
         with open(self.synonym_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def _load_synonyms(self):
+    def _load_data(self):
         with open(self.synonym_path, 'r', encoding='utf-8') as f:
             return json.load(f)
 
+    def get_term_info(self, term):
+        return self.term_data.get(term, {'synonyms': [], 'negatives': []})
+
     def get_synonyms(self):
-        return self.synonyms
+        return self.term_data
+
+
+if __name__ == '__main__':
+    sm = SynonymManager()
