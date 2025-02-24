@@ -61,7 +61,7 @@ class AcademicCalendarRAG:
         query_keywords = self._extract_keywords(query)
         q_lower = query.lower().replace(" ", "")
         print(f"소문자 변환 질문: {q_lower}")
-        query_key = " ".join(query_keywords)  # 키워드 조합으로 키 생성
+        query_key = " ".join(query_keywords)
         print(f"쿼리 키: {query_key}")
         print(f"동의어: {self.synonym_map.get(query_key, [])}")
         print(f"배제어: {self.negative_map.get(query_key, [])}")
@@ -70,18 +70,15 @@ class AcademicCalendarRAG:
         similarities = util.cos_sim(query_embedding, self.document_embeddings)[0].cpu().numpy()
         print(f"초기 유사도 계산 완료 - {len(similarities)}개 문서")
 
-        # 가중치 계산 디버깅
         for i in range(len(similarities)):
             title = self.df.iloc[i]['Title'].lower().replace(" ", "")
             original_similarity = similarities[i]
             print(f"\n문서 {i}: {self.df.iloc[i]['Title']}")
             print(f"  초기 유사도: {original_similarity:.4f}")
 
-            # 긍정 가중치 조건
             exact_match = any(kw.lower() == title for kw in query_keywords)
             synonym_match = any(syn in title for syn in self.synonym_map.get(query_key, []))
             keyword_match = any(kw in title for kw in query_keywords)
-            # 부정 가중치 조건
             negative_terms = self.negative_map.get(query_key, [])
             negative_match = any(nt in title for nt in negative_terms) and '수강신청' in q_lower
             basket_confusion = "장바구니" in title and "수강신청" in q_lower
@@ -95,7 +92,6 @@ class AcademicCalendarRAG:
             elif keyword_match:
                 similarities[i] *= 1.2
                 print(f"  키워드 포함 적용 (×1.2): {similarities[i]:.4f}")
-
             if negative_match:
                 similarities[i] *= 0.3
                 print(f"  배제어 패널티 적용 (×0.3): {similarities[i]:.4f}")
@@ -103,9 +99,16 @@ class AcademicCalendarRAG:
                 similarities[i] *= 0.5
                 print(f"  장바구니 혼동 패널티 적용 (×0.5): {similarities[i]:.4f}")
 
+            current_month = self.current_date.month
+            if "1학기" in self.df.iloc[i]['Title'] and 2 <= current_month <= 7:
+                similarities[i] *= 1.02
+                print(f"  1학기 가중치 적용 (×1.02, {current_month}월): {similarities[i]:.4f}")
+            elif "2학기" in self.df.iloc[i]['Title'] and (8 <= current_month <= 12 or current_month == 1):
+                similarities[i] *= 1.02
+                print(f"  2학기 가중치 적용 (×1.02, {current_month}월): {similarities[i]:.4f}")
+
             print(f"  최종 유사도: {similarities[i]:.4f}")
 
-        # 결과 필터링
         top_indices = similarities.argsort()[-top_k:][::-1]
         print(f"\n상위 {top_k}개 인덱스: {top_indices}")
         print(f"상위 유사도: {[f'{similarities[idx]:.4f}' for idx in top_indices]}")
@@ -118,10 +121,9 @@ class AcademicCalendarRAG:
         return filtered_docs if not filtered_docs.empty else pd.DataFrame()
 
     def _extract_semester(self, events):
-        future_events = events[events['Start'] > self.current_date]
-        if future_events.empty:
+        if events.empty:
             return None
-        closest_event = future_events.sort_values('Start').iloc[0]
+        closest_event = events.loc[(events['Start'] - self.current_date).abs().idxmin()]
         start_year = closest_event['Start'].year
         if re.search(r'\d-학기', closest_event['Title']):
             semester = f"{start_year}-{re.search(r'\d-학기', closest_event['Title']).group()}"
@@ -136,8 +138,23 @@ class AcademicCalendarRAG:
         if semester:
             events = events[events['Title'].str.contains(semester, na=False)]
             print(f"학기 필터링 적용: {semester}")
+
+        # 진행 중: 현재 날짜가 Start와 End 사이에 포함
+        ongoing = events[(events['Start'] <= self.current_date) & (self.current_date <= events['End'])]
+        # 과거: 종료일이 현재 날짜보다 이전
         past = events[events['End'] < self.current_date]
+        # 미래: 시작일이 현재 날짜보다 이후
         future = events[events['Start'] > self.current_date]
+
+        if not ongoing.empty:
+            response.append("### 진행 중인 일정")
+            for _, row in ongoing.iterrows():
+                response.append(
+                    f"- 💡 {row['Title']}\n"
+                    f" ▸ 기간: {row['Start'].date()} ~ {row['End'].date()}\n"
+                    f" ▸ 상태: 진행 중\n"
+                )
+
         if not past.empty:
             response.append("### 과거 일정")
             for _, row in past.iterrows():
@@ -147,18 +164,21 @@ class AcademicCalendarRAG:
                     f" ▸ 기간: {row['Start'].date()} ~ {row['End'].date()}\n"
                     f" ▸ 상태: 종료 (D+{days_passed})\n"
                 )
+
         if not future.empty:
             response.append("### 미래 일정")
             sorted_future = future.sort_values('Start')
-            closest = sorted_future.iloc[0]
-            for _, row in sorted_future.iterrows():
+            # 진행 중인 일정이 있으면 💡 사용 안 함
+            use_highlight = ongoing.empty
+            for i, (_, row) in enumerate(sorted_future.iterrows()):
                 days_remaining = (row['Start'] - self.current_date).days
-                icon = "💡" if row.equals(closest) else "🟢"
+                icon = "💡" if use_highlight and i == 0 else "🟢"
                 response.append(
                     f"- {icon} {row['Title']}\n"
                     f" ▸ 기간: {row['Start'].date()} ~ {row['End'].date()}\n"
                     f" ▸ 상태: D-{days_remaining} 예정\n"
                 )
+
         response.append("\n※ 정확한 정보는 학사운영팀(📞 02-2287-7077)으로 문의 바랍니다.")
         return "\n".join(response)
 
@@ -166,7 +186,7 @@ class AcademicCalendarRAG:
         results = self._get_relevant_documents(question)
         return self._format_response(results, question) if not results.empty else (
             f"⚠️ '{question}' 관련 일정을 찾지 못했습니다.\n"
-            f"학사운영팀(☎ 02-2287-7077)으로 문의주시기 바랍니다."
+            f"오타가 있는지 확인해 주시거나 자세한 사항은 학사운영팀(☎ 02-2287-7077)으로 문의해 주세요."
         )
 
     def main(self):
