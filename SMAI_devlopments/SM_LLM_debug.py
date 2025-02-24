@@ -13,6 +13,7 @@ class AcademicCalendarRAG:
         self.term_db = self.synonym_mgr.get_synonyms()
         self.synonym_map = {term: data['synonyms'] for term, data in self.term_db.items()}
         self.negative_map = {term: data['negatives'] for term, data in self.term_db.items()}
+        self.category_map = {term: data.get('category', 'general') for term, data in self.term_db.items()}  # 범주 맵 추가
         self.df = self._load_data(csv_path)
         self.model = SentenceTransformer('distiluse-base-multilingual-cased-v1')
         self.kiwi = Kiwi()
@@ -56,15 +57,26 @@ class AcademicCalendarRAG:
         print(f"추출된 키워드: {keywords}")
         return keywords
 
+    def _infer_category(self, query, query_keywords):
+        """질문에서 범주를 추론"""
+        for term, category in self.category_map.items():
+            if term in query or any(kw in term for kw in query_keywords):
+                print(f"추론된 범주: {category} (매칭된 용어: {term})")
+                return category
+        print("추론된 범주: general (기본값)")
+        return 'general'
+
     def _get_relevant_documents(self, query, top_k=10, similarity_threshold=0.3):
         print(f"\n=== 질문 처리 시작: '{query}' ===")
         query_keywords = self._extract_keywords(query)
+        inferred_category = self._infer_category(query, query_keywords)  # 범주 추론
         q_lower = query.lower().replace(" ", "")
         print(f"소문자 변환 질문: {q_lower}")
         query_key = " ".join(query_keywords)
         print(f"쿼리 키: {query_key}")
         print(f"동의어: {self.synonym_map.get(query_key, [])}")
         print(f"배제어: {self.negative_map.get(query_key, [])}")
+        print(f"추론된 범주: {inferred_category}")
 
         query_embedding = self.model.encode(query, convert_to_tensor=True)
         similarities = util.cos_sim(query_embedding, self.document_embeddings)[0].cpu().numpy()
@@ -72,9 +84,17 @@ class AcademicCalendarRAG:
 
         for i in range(len(similarities)):
             title = self.df.iloc[i]['Title'].lower().replace(" ", "")
+            doc_category = self.category_map.get(self.df.iloc[i]['Title'], 'general')  # 문서의 범주
             original_similarity = similarities[i]
             print(f"\n문서 {i}: {self.df.iloc[i]['Title']}")
             print(f"  초기 유사도: {original_similarity:.4f}")
+            print(f"  문서 범주: {doc_category}")
+
+            # 범주 필터링: 추론된 범주와 다르면 패널티 적용
+            if doc_category != inferred_category:
+                similarities[i] *= 0.1  # 엄격한 패널티
+                print(f"  범주 불일치 패널티 적용 (×0.1): {similarities[i]:.4f}")
+                continue
 
             exact_match = any(kw.lower() == title for kw in query_keywords)
             synonym_match = any(syn in title for syn in self.synonym_map.get(query_key, []))
@@ -139,11 +159,8 @@ class AcademicCalendarRAG:
             events = events[events['Title'].str.contains(semester, na=False)]
             print(f"학기 필터링 적용: {semester}")
 
-        # 진행 중: 현재 날짜가 Start와 End 사이에 포함
         ongoing = events[(events['Start'] <= self.current_date) & (self.current_date <= events['End'])]
-        # 과거: 종료일이 현재 날짜보다 이전
         past = events[events['End'] < self.current_date]
-        # 미래: 시작일이 현재 날짜보다 이후
         future = events[events['Start'] > self.current_date]
 
         if not ongoing.empty:
@@ -168,7 +185,6 @@ class AcademicCalendarRAG:
         if not future.empty:
             response.append("### 미래 일정")
             sorted_future = future.sort_values('Start')
-            # 진행 중인 일정이 있으면 💡 사용 안 함
             use_highlight = ongoing.empty
             for i, (_, row) in enumerate(sorted_future.iterrows()):
                 days_remaining = (row['Start'] - self.current_date).days
