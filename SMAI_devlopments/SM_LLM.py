@@ -99,7 +99,7 @@ class AcademicCalendarRAG:
             elif basket_confusion:
                 similarities[i] *= 0.5
 
-            # 학기별 시의성 가중치 적용
+            # 학기별 월 별로 가중치 적용
             current_month = self.current_date.month
             if "1학기" in self.df.iloc[i]['Title'] and 2 <= current_month <= 7:
                 similarities[i] *= 1.02
