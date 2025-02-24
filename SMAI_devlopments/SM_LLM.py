@@ -11,7 +11,9 @@ class AcademicCalendarRAG:
         self.synonym_mgr = SynonymManager()
         self._wait_for_synonyms()
         self.term_db = self.synonym_mgr.get_synonyms()
+        # 동의어와 배제어를 각각 매핑
         self.synonym_map = {term: data['synonyms'] for term, data in self.term_db.items()}
+        self.negative_map = {term: data['negatives'] for term, data in self.term_db.items()}
         self.df = self._load_data(csv_path)
         self.model = SentenceTransformer('distiluse-base-multilingual-cased-v1')
         self.kiwi = Kiwi()
@@ -23,7 +25,6 @@ class AcademicCalendarRAG:
         while not self.synonym_mgr.synonym_path.exists():
             if retry_count == 0:
                 print("동의어 사전 생성 중... (최대 2분 소요)")
-                #self.synonym_mgr._generate_synonyms() #함수명 변경됨
                 self.synonym_mgr._generate_terms()
             if retry_count >= 12:
                 raise FileNotFoundError("동의어 사전 생성 실패")
@@ -36,7 +37,6 @@ class AcademicCalendarRAG:
         df['Start'] = pd.to_datetime(df['Start'])
         df['End'] = pd.to_datetime(df['End'])
         current_date = pd.Timestamp(datetime.today().date())
-        print("현재 날짜:", current_date)
         df = df[df['Start'].dt.year >= current_date.year]
         df['document'] = df['Title']
         return df
@@ -65,7 +65,8 @@ class AcademicCalendarRAG:
             exact_match = any(kw.lower() == title for kw in query_keywords)
             synonym_match = any(syn in title for syn in self.synonym_map.get(query, []))
             # 부정 가중치 조건
-            negative_match = any(nt in title for nt in self.negative_terms) and '수강신청' in q_lower
+            negative_terms = self.negative_map.get(query, [])  # 쿼리에 해당하는 배제어 가져오기
+            negative_match = any(nt in title for nt in negative_terms) and '수강신청' in q_lower
             if exact_match:
                 similarities[i] *= 2.0
             elif synonym_match:
