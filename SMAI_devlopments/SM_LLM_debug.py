@@ -7,7 +7,6 @@ from kiwipiepy import Kiwi
 from SynonymPattern import SynonymManager
 from hanspell import spell_checker  # py-hanspell-aideer에서 제공
 
-
 # 동의어, 배제어, 범주 데이터를 매핑
 class AcademicCalendarRAG:
     def __init__(self, csv_path='hagsailjeong.csv'):
@@ -50,37 +49,49 @@ class AcademicCalendarRAG:
             show_progress_bar=True
         )
 
-    # 오타 교정 후 명사 키워드 추출 (디버그용 프린트 포함)
+    # 오타 교정 후 명사 키워드 추출 (디버깅 강화)
     def _extract_keywords(self, query):
         print(f"📝 원본 쿼리: '{query}'")
 
-        # py-hanspell-aideer를 사용해 오타 교정
+        # 오타 교정 시도
+        print("🔍 오타 교정 시작...")
+        corrected_query = query  # 기본값으로 원문 설정
         try:
-            print("🔍 오타 교정 시작...")
-            corrected = spell_checker.check(query)
-            corrected_query = corrected.checked  # 교정된 텍스트 반환
+            result = spell_checker.check(query)
+            print(f"🔎 교정 결과 객체: {result.__dict__}")  # 반환 객체의 전체 구조 출력
+            corrected_query = result.checked
             print(f"✅ 교정된 쿼리: '{corrected_query}'")
             if query != corrected_query:
                 print(f"⚠️ 오타 수정 감지: '{query}' → '{corrected_query}'")
             else:
                 print("ℹ️ 오타 없음: 원문 유지")
         except Exception as e:
-            print(f"❌ 오타 교정 중 오류 발생: {e}")
+            print(f"❌ 오타 교정 중 오류 발생: {type(e).__name__} - {str(e)}")
+            print(f"📌 오류 세부사항: 입력값='{query}', 반환값 시도 불가")
             corrected_query = query  # 오류 시 원문 사용
             print(f"📌 오류로 원문 사용: '{corrected_query}'")
 
-        # 교정된 쿼리에서 토큰화
+            # 대체 오타 교정 시도
+            print("🔧 대체 오타 교정 시도 중...")
+            for term in self.synonym_map.keys():
+                if any(kw in term or term in kw for kw in self.kiwi.tokenize(query)):
+                    print(f"ℹ️ 유사 용어 발견: '{term}' (동의어: {self.synonym_map[term]})")
+                    corrected_query = term
+                    break
+            if corrected_query != query:
+                print(f"✅ 대체 교정 성공: '{query}' → '{corrected_query}'")
+
+        # 토큰화 및 키워드 추출
         print("🔧 Kiwi로 토큰화 시작...")
         tokens = self.kiwi.tokenize(corrected_query)
-        print(f"📋 토큰화 결과: {[(t.form, t.tag) for t in tokens]}")
-
-        # 명사 키워드 추출
+        print(f"📋 토큰화 결과: {[(t.form, t.tag, t.start, t.len) for t in tokens]}")  # 위치 정보 포함
         keywords = [token.form for token in tokens if token.tag.startswith('NN')] or [corrected_query]
         print(f"🔑 추출된 명사 키워드: {keywords}")
+        print(f"📌 키워드 추출 근거: 명사 태그(NN*) 우선, 없으면 전체 쿼리 사용")
 
         return keywords
 
-    # 질문에서 범주(enrollment, grade 등)를 추론 (디버그용 프린트 포함)
+    # 질문에서 범주(enrollment, grade 등)를 추론
     def _infer_category(self, query, query_keywords):
         print(f"🔎 범주 추론 시작 - 쿼리: '{query}', 키워드: {query_keywords}")
         for term, category in self.category_map.items():
@@ -195,40 +206,54 @@ class AcademicCalendarRAG:
         response.append("\n※ 정확한 정보는 학사운영팀(📞 02-2287-7077)으로 문의 바랍니다.")
         return "\n".join(response)
 
-    # 질문에 대한 최종 답변 생성 (6번: 사용자 피드백 기반 재학습 추가)
+    # 질문에 대한 최종 답변 생성 (디버깅 강화 및 사용자 피드백 기반 재학습)
     def get_answer(self, query):
+        start = time.time()
         results = self._get_relevant_documents(query)
         if not results.empty:
-            return self._format_response(results, query)
+            response = self._format_response(results, query)
+            print(f"\n{response}")
+            print(f"\n⏱️ 처리 시간: {time.time() - start:.2f}초")
+            return response
 
-        # 검색 실패 시 사용자 피드백 요청
         print(f"⚠️ '{query}' 관련 일정을 찾지 못했습니다.")
-        corrected_keywords = self._extract_keywords(query)  # 교정된 키워드 재확인
+        corrected_keywords = self._extract_keywords(query)
         possible_term = None
 
-        # 동의어 사전에서 유사한 용어 추천
+        # 동의어 사전에서 유사 용어 탐색
+        print("🔍 동의어 사전 탐색 중...")
         for term in self.synonym_map.keys():
             if any(kw in term or term in kw for kw in corrected_keywords):
+                print(f"ℹ️ 유사 용어 제안 근거: '{term}'이 키워드 {corrected_keywords}와 매칭")
                 possible_term = term
                 break
+        if not possible_term:
+            print("❌ 유사 용어 발견 실패")
 
         if possible_term:
             print(f"ℹ️ 혹시 '{possible_term}'를 의미하셨나요? (y/n)")
             feedback = input().lower()
             if feedback == 'y':
-                # 사용자 피드백 반영: 원래 쿼리를 동의어로 추가
                 self.synonym_map[query] = self.synonym_map[possible_term]
                 print(f"✅ '{query}'를 '{possible_term}'의 동의어로 학습했습니다.")
-                results = self._get_relevant_documents(possible_term)  # 재검색
-                return self._format_response(results, possible_term) if not results.empty else (
-                    f"⚠️ '{possible_term}' 관련 일정도 찾지 못했습니다.\n"
-                    f"자세한 사항은 학사운영팀(☎ 02-2287-7077)으로 문의해 주세요."
+                results = self._get_relevant_documents(possible_term)
+                response = (
+                    self._format_response(results, possible_term) if not results.empty else (
+                        f"⚠️ '{possible_term}' 관련 일정도 찾지 못했습니다.\n"
+                        f"자세한 사항은 학사운영팀(☎ 02-2287-7077)으로 문의해 주세요."
+                    )
                 )
+                print(f"\n{response}")
+                print(f"\n⏱️ 처리 시간: {time.time() - start:.2f}초")
+                return response
 
-        return (
+        response = (
             f"⚠️ '{query}' 관련 일정을 찾지 못했습니다.\n"
             f"오타가 있는지 확인해 주시거나 자세한 사항은 학사운영팀(☎ 02-2287-7077)으로 문의해 주세요."
         )
+        print(f"\n{response}")
+        print(f"\n⏱️ 처리 시간: {time.time() - start:.2f}초")
+        return response
 
     def main(self):
         print("\n🔍 학사일정 조회 시스템 작동 중...")
@@ -236,10 +261,7 @@ class AcademicCalendarRAG:
             query = input("\n질문 (종료: quit): ")
             if query.lower() in ['quit', 'exit']:
                 break
-            start = time.time()
-            print(f"\n{self.get_answer(query)}")
-            print(f"\n⏱️ 처리 시간: {time.time() - start:.2f}초")
-
+            self.get_answer(query)
 
 if __name__ == "__main__":
     AcademicCalendarRAG().main()
