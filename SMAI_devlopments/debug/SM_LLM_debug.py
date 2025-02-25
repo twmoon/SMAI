@@ -4,7 +4,7 @@ import time
 import re
 from sentence_transformers import SentenceTransformer, util
 from kiwipiepy import Kiwi
-from SynonymPattern import SynonymManager
+from SynonymPattern_debug import SynonymManager
 from hanspell import spell_checker  # py-hanspell-aideer에서 제공
 
 # 동의어, 배제어, 범주 데이터를 매핑
