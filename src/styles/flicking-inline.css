@@ -1,0 +1,18 @@
+/* flicking-inline.css - 인라인 슬라이드 효과를 위한 특수 스타일 */
+.flicking-inline {
+    display: inline-block;
+    width: 100%;
+  }
+  
+  .flicking-inline .flicking-viewport {
+    width: 100%;
+  }
+  
+  .flicking-inline .flicking-camera {
+    will-change: transform;
+  }
+  
+  .flicking-inline .flicking-panel {
+    padding: 8px;
+  }
+  

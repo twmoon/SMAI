@@ -1,0 +1,17 @@
+/* flicking.css - 슬라이드 효과를 위한 기본 스타일 */
+.flicking-viewport {
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .flicking-camera {
+    display: flex;
+    position: relative;
+    transition: transform 0.2s ease;
+  }
+  
+  .flicking-panel {
+    position: relative;
+    flex-shrink: 0;
+  }
+  
